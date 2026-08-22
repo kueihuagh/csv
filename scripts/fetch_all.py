@@ -8,11 +8,15 @@
 - 毎回「取得可能な最大窓」を取りに行き、既存CSVとマージして重複排除する。
   （実行を1〜2日飛ばしても、窓の範囲内なら欠損しない）
 - 1分足は1リクエスト7日制限があるため、7日ずつチャンクに分けて
-  過去29日分を取得・結合する。
+  過去29日分を取得・結合する（境界は必ず30日以内に収める）。
 - 出力はプロジェクトの既存CSVと同じ日本語カラム名に揃える。
+- yfinanceはGitHub Actionsの共有IPからレートリミットを受けることがあるため、
+  各取得にリトライ（指数バックオフ）を入れる。
 """
 
 import os
+import time
+import random
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -28,6 +32,26 @@ TICKERS = {
     "etf1357": "1357.T",
 }
 
+MAX_RETRIES = 4
+
+
+def _download_with_retry(**kwargs) -> pd.DataFrame:
+    """yf.downloadをリトライ付きで実行する。レートリミット等の一時エラーに対応。"""
+    last_err = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            df = yf.download(**kwargs, progress=False, auto_adjust=False)
+            if df is not None and not df.empty:
+                return df
+            last_err = "empty result"
+        except Exception as e:
+            last_err = e
+        wait = (2 ** attempt) + random.uniform(0, 1)
+        print(f"    リトライ待機 {wait:.1f}s（{attempt + 1}/{MAX_RETRIES}回目、理由: {last_err}）")
+        time.sleep(wait)
+    print(f"    取得失敗（最終）: {last_err}")
+    return pd.DataFrame()
+
 
 def _to_jst(df: pd.DataFrame) -> pd.DataFrame:
     """indexをAsia/Tokyoに変換する（tzなしの場合はUTC由来として付与してから変換）"""
@@ -38,7 +62,7 @@ def _to_jst(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_daily(ticker: str) -> pd.DataFrame:
-    df = yf.download(ticker, period="2y", interval="1d", progress=False, auto_adjust=False)
+    df = _download_with_retry(tickers=ticker, period="2y", interval="1d")
     if df.empty:
         return df
     df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -54,7 +78,7 @@ def fetch_daily(ticker: str) -> pd.DataFrame:
 
 
 def fetch_5min(ticker: str) -> pd.DataFrame:
-    df = yf.download(ticker, period="60d", interval="5m", progress=False, auto_adjust=False)
+    df = _download_with_retry(tickers=ticker, period="60d", interval="5m")
     if df.empty:
         return df
     df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -71,20 +95,26 @@ def fetch_5min(ticker: str) -> pd.DataFrame:
 
 
 def fetch_1min(ticker: str, days_back: int = 29) -> pd.DataFrame:
+    """
+    過去days_back日分を7日ずつのチャンクで取得する。
+    境界は必ず [now - days_back, now] の範囲内に収め、30日制限を超えない。
+    """
     frames = []
     now = datetime.now(JST)
-    i = 0
-    while i < days_back:
-        chunk_end = now - timedelta(days=i)
-        chunk_start = chunk_end - timedelta(days=7)
-        df = yf.download(
-            ticker, start=chunk_start, end=chunk_end,
-            interval="1m", progress=False, auto_adjust=False,
+    window_start = now - timedelta(days=days_back)
+
+    chunk_start = window_start
+    while chunk_start < now:
+        chunk_end = min(chunk_start + timedelta(days=7), now)
+        df = _download_with_retry(
+            tickers=ticker, start=chunk_start, end=chunk_end, interval="1m",
         )
         if not df.empty:
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
             frames.append(_to_jst(df))
-        i += 7
+        chunk_start = chunk_end
+        time.sleep(1)  # 連続リクエストの間隔を空ける
+
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames)
@@ -124,6 +154,7 @@ def main():
             os.path.join(DATA_DIR, f"{name}_daily.csv"),
             key_cols=["日付"],
         )
+        time.sleep(1)
 
         print(f"[{name} / {ticker}] 5分足取得中...")
         merge_and_save(
@@ -131,6 +162,7 @@ def main():
             os.path.join(DATA_DIR, f"{name}_5min.csv"),
             key_cols=["日付", "時刻"],
         )
+        time.sleep(1)
 
         print(f"[{name} / {ticker}] 1分足取得中...")
         merge_and_save(
@@ -138,6 +170,7 @@ def main():
             os.path.join(DATA_DIR, f"{name}_1min.csv"),
             key_cols=["日付", "時刻"],
         )
+        time.sleep(1)
 
 
 if __name__ == "__main__":
