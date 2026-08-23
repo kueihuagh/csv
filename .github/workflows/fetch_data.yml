@@ -3,7 +3,7 @@ name: fetch-market-data
 on:
   schedule:
     # 07:00 UTC = 16:00 JST（平日のみ）
-    - cron: "0 7 * * 1-5"
+   - cron: "50 6 * * 1-5"
   workflow_dispatch: {}  # 手動実行ボタンも使えるようにしておく
 
 permissions:
