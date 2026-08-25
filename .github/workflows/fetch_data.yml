@@ -1,10 +1,9 @@
 name: fetch-market-data
 
 on:
-  schedule:
-  # 06:50 UTC = 15:50 JST（平日のみ）
-   - cron: "50 6 * * 1-5"
-  workflow_dispatch: {}  # 手動実行ボタンも使えるようにしておく
+  workflow_dispatch: {}  # 手動実行ボタン
+  repository_dispatch:
+    types: [run-fetch]   # 外部（cron-job.org）からのHTTPリクエストで起動
 
 permissions:
   contents: write
