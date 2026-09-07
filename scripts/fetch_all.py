@@ -1,13 +1,18 @@
 """
 日次データ取得スクリプト（GitHub Actions想定）
 
-対象：日経225現物（^N225）、1579.T、1357.T
-足種：日足・5分足・1分足
+対象：
+- 日経225現物（^N225）、1579.T、1357.T（日足・5分足・1分足、yfinance経由）
+- 日経平均VI（日足、日本経済新聞社の公式CSVを直接取得）
 
-CSV仕様：
+CSV仕様（現物・ETF）：
 - 1行目：銘柄コード（例：^N225）
 - 2行目：ヘッダー（日足は Date,Open,High,Low,Close／分足は Date,Time,Open,High,Low,Close）
 - 3行目以降：データ
+
+CSV仕様（VI）：
+- ヘッダー：Date,Open,High,Low,Close
+- データ：日次
 
 設計方針：
 - 毎回「取得可能な最大窓」を取りに行き、既存CSVとマージして重複排除する。
@@ -16,20 +21,26 @@ CSV仕様：
 - yfinanceはGitHub Actionsの共有IPからレートリミットを受けることがあるため、
   各取得にリトライ（指数バックオフ）を入れる。
 
-欠損補完（8/23追加、8/23改訂）：
+欠損補完：
 - Yahoo Financeは特定の足（寄り09:00、引け際15:25/15:30等）を配信しないことがある。
 - 基本ルール：セッション内（前場09:00-11:30、後場12:30-last_slot）で欠けている
   時刻は、直前の実データの終値でフラットOHLC（O=H=L=C）を作って埋める。
   日の先頭が欠損の場合は、その日最初の実データの始値で埋める。
 - 【現物（^N225）のみ】末尾の欠損（15:30）は、直前5分足の終値ではなく
-  日足の確定終値で埋める（より確実な値のため）。5分足→1分足の順で
-  同じ確定終値を使って埋める（1分足にも15:30枠を新設）。
-  ETF（1579/1357）はこの上書きを行わず、従来どおり直前値の横引き。
+  日足の確定終値で埋める。5分足→1分足の順で同じ確定終値を使って埋める
+  （1分足にも15:30枠を新設）。ETF（1579/1357）はこの上書きを行わず、
+  従来どおり直前値の横引き。
+
+VI（日経平均VI）：
+- 日本経済新聞社の公式CSV（ログイン不要・robots制限なし）を直接ダウンロード。
+- 元データはShift-JIS(CP932)エンコード。末尾に免責文の行があるため除外する。
+- 既存データとDateキーでマージ・重複排除。
 """
 
 import os
 import time
 import random
+import urllib.request
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -49,6 +60,9 @@ MAX_RETRIES = 4
 
 DAILY_COLS = ["Date", "Open", "High", "Low", "Close"]
 INTRADAY_COLS = ["Date", "Time", "Open", "High", "Low", "Close"]
+
+VI_URL = "https://indexes.nikkei.co.jp/nkave/historical/nikkei_stock_average_vi_daily_jp.csv"
+VI_COLS = ["Date", "Open", "High", "Low", "Close"]
 
 
 def _download_with_retry(**kwargs) -> pd.DataFrame:
@@ -208,6 +222,46 @@ def fetch_1min(ticker: str, days_back: int = 29) -> pd.DataFrame:
     return out
 
 
+def fetch_vi_daily() -> pd.DataFrame:
+    """日経平均VIの日次データを日本経済新聞社の公式CSVから取得する。"""
+    try:
+        req = urllib.request.Request(VI_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as res:
+            raw = res.read()
+    except Exception as e:
+        print(f"  VI取得失敗: {e}")
+        return pd.DataFrame()
+
+    try:
+        text = raw.decode("cp932")
+    except UnicodeDecodeError:
+        text = raw.decode("cp932", errors="ignore")
+
+    lines = [l for l in text.strip().split("\n") if l.strip()]
+    if len(lines) < 2:
+        return pd.DataFrame()
+
+    data_lines = lines[1:]
+    data_lines = [l for l in data_lines if l.startswith('"20')]
+
+    rows = []
+    for line in data_lines:
+        parts = [p.strip('"') for p in line.split(",")]
+        if len(parts) != 5:
+            continue
+        date_raw, v1, v2, v3, v4 = parts
+        try:
+            date_fmt = datetime.strptime(date_raw, "%Y/%m/%d").strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+        rows.append({
+            "Date": date_fmt,
+            "Open": v1, "High": v2, "Low": v3, "Close": v4,
+        })
+
+    return pd.DataFrame(rows, columns=VI_COLS)
+
+
 def merge_and_save(
     new_df: pd.DataFrame,
     path: str,
@@ -251,6 +305,7 @@ def merge_and_save(
 
 def main():
     os.makedirs(DATA_DIR, exist_ok=True)
+
     for name, ticker in TICKERS.items():
         print(f"[{name} / {ticker}] 日足取得中...")
         daily_combined = merge_and_save(
@@ -291,6 +346,15 @@ def main():
             close_override=close_override,
         )
         time.sleep(1)
+
+    print("[VI] 日経平均VI取得中...")
+    merge_and_save(
+        fetch_vi_daily(),
+        os.path.join(DATA_DIR, "vi_daily.csv"),
+        key_cols=["Date"],
+        ticker_symbol="NikkeiVI",
+        header_cols=VI_COLS,
+    )
 
 
 if __name__ == "__main__":
