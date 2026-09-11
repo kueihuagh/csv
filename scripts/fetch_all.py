@@ -249,14 +249,16 @@ def fetch_vi_daily() -> pd.DataFrame:
         parts = [p.strip('"') for p in line.split(",")]
         if len(parts) != 5:
             continue
-        date_raw, v1, v2, v3, v4 = parts
+        # 公式CSVの実際の値の並びは 終値,始値,高値,安値 で、Date,Open,High,Low,Close という
+        # ヘッダー表記とはズレている（9/9判明）。ラベルではなく位置で正しく対応付ける。
+        date_raw, v_close, v_open, v_high, v_low = parts
         try:
             date_fmt = datetime.strptime(date_raw, "%Y/%m/%d").strftime("%Y-%m-%d")
         except ValueError:
             continue
         rows.append({
             "Date": date_fmt,
-            "Open": v1, "High": v2, "Low": v3, "Close": v4,
+            "Open": v_open, "High": v_high, "Low": v_low, "Close": v_close,
         })
 
     return pd.DataFrame(rows, columns=VI_COLS)
